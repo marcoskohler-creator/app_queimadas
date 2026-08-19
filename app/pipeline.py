@@ -36,6 +36,9 @@ class PipelineError(Exception):
 
 EVALSCRIPT_BANDAS = """
 //VERSION=3
+// Retorna as bandas em reflectancia de superficie (valores analiticos,
+// nao visualizacao), como FLOAT32 - equivalente ao download "Analytical"
+// do Copernicus Browser em TIFF 32-bit float.
 function setup() {
   return {
     input: ["B04", "B08", "B12", "dataMask"],
@@ -161,18 +164,39 @@ def buscar_cena_sentinel2(bbox_wgs84, data_ref, direcao, token,
     }
 
 
-def _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=10, max_px=1500):
-    """Calcula largura/altura em pixels a partir do bbox e resolução alvo,
-    limitando o tamanho máximo para respeitar cotas da API."""
+def _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=10, max_px=2500):
+    """
+    Calcula largura/altura em pixels a partir do bbox e da resolução
+    nativa do satélite.
+
+    O teto de max_px existe porque o Process API do Sentinel Hub tem
+    limite de dimensão por requisição. Quando a área pedida é grande
+    demais para caber na resolução nativa, a imagem é reamostrada — ou
+    seja, a resolução efetiva piora. A função devolve também a resolução
+    efetiva resultante, para que isso possa ser informado ao usuário em
+    vez de degradar silenciosamente.
+
+    Retorna (largura, altura, resolucao_efetiva_m).
+    """
     epsg_utm = epsg_wgs84_utm((bbox_wgs84[0] + bbox_wgs84[2]) / 2,
                                (bbox_wgs84[1] + bbox_wgs84[3]) / 2)
     para_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True)
     x_min, y_min = para_utm.transform(bbox_wgs84[0], bbox_wgs84[1])
     x_max, y_max = para_utm.transform(bbox_wgs84[2], bbox_wgs84[3])
 
-    largura = int(min(max_px, max(64, round((x_max - x_min) / resolucao_m))))
-    altura = int(min(max_px, max(64, round((y_max - y_min) / resolucao_m))))
-    return largura, altura
+    largura_m = x_max - x_min
+    altura_m = y_max - y_min
+
+    largura_nativa = round(largura_m / resolucao_m)
+    altura_nativa = round(altura_m / resolucao_m)
+
+    largura = int(min(max_px, max(64, largura_nativa)))
+    altura = int(min(max_px, max(64, altura_nativa)))
+
+    # Se foi necessário limitar, a resolução efetiva piora proporcionalmente
+    resolucao_efetiva = max(largura_m / largura, altura_m / altura)
+
+    return largura, altura, resolucao_efetiva
 
 
 def obter_bandas(bbox_wgs84, data_iso, token, largura_px, altura_px):
@@ -195,6 +219,14 @@ def obter_bandas(bbox_wgs84, data_iso, token, largura_px, altura_px):
             "data": [{
                 "type": "sentinel-2-l2a",
                 "dataFilter": {"timeRange": {"from": data_ini, "to": data_fim}},
+                # Reamostragem por vizinho mais próximo: preserva o valor
+                # medido de cada pixel, sem interpolação/suavização. É o
+                # esperado para uso analítico (equivalente ao download
+                # "Analytical" do Copernicus Browser).
+                "processing": {
+                    "upsampling": "NEAREST",
+                    "downsampling": "NEAREST",
+                },
             }],
         },
         "output": {
@@ -548,7 +580,8 @@ def executar_pipeline(data_referencia, latitude, longitude,
                 "'nuvem_maxima', ou tente o satélite Landsat."
             )
 
-        largura_px, altura_px = _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=resolucao_m)
+        largura_px, altura_px, resolucao_efetiva = _resolucao_para_dimensoes(
+            bbox_wgs84, resolucao_m=resolucao_m)
 
         dados_antes_raw, perfil = obter_bandas(
             bbox_wgs84, cena_antes["data"], token, largura_px, altura_px)
@@ -569,6 +602,9 @@ def executar_pipeline(data_referencia, latitude, longitude,
             )
 
         dados_antes_raw, perfil = obter_bandas_landsat(cena_antes["assets"], bbox_wgs84)
+        # Landsat é lido direto do COG na resolução nativa (sem limite de
+        # dimensão por requisição como no Process API do Sentinel Hub).
+        resolucao_efetiva = resolucao_m
         dados_depois_raw, _ = obter_bandas_landsat(cena_depois["assets"], bbox_wgs84)
 
     dados_antes = tuple(dados_antes_raw)   # (B04, B08, B12, dataMask)
@@ -599,6 +635,7 @@ def executar_pipeline(data_referencia, latitude, longitude,
     return {
         "satelite_usado": satelite,
         "resolucao_m": resolucao_m,
+        "resolucao_efetiva_m": round(resolucao_efetiva, 2),
         "cena_antes": cena_antes_out,
         "cena_depois": cena_depois_out,
         "area_ha": round(area_ha, 4),

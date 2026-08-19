@@ -529,13 +529,27 @@ async function pollStatus(jobId) {
 
 function mostrarResultado(jobId, resultado) {
   const nomeSatelite = resultado.satelite_usado === 'landsat' ? 'Landsat 8/9' : 'Sentinel-2';
+  const resEfetiva = resultado.resolucao_efetiva_m || resultado.resolucao_m;
+  const degradou = resEfetiva > resultado.resolucao_m + 0.05;
+
+  const linhaResolucao = degradou
+    ? `<div><b>Resolução:</b> ${resEfetiva} m/pixel
+         <span style="color:var(--accent)">(nativa ${resultado.resolucao_m} m — reduzida pelo tamanho da área)</span></div>`
+    : `<div><b>Resolução:</b> ${resEfetiva} m/pixel (nativa)</div>`;
+
   resultadoDiv.innerHTML = `
-    <div><b>Satélite usado:</b> ${nomeSatelite} (${resultado.resolucao_m}m/pixel)</div>
+    <div><b>Satélite usado:</b> ${nomeSatelite}</div>
+    ${linhaResolucao}
     <div><b>Área queimada:</b> ${resultado.area_ha.toLocaleString('pt-BR')} ha</div>
     <div><b>CRS saída (polígono):</b> EPSG:${resultado.epsg_saida} (SIRGAS2000)</div>
     <div><b>CRS usado no cálculo:</b> EPSG:${resultado.epsg_utm_usado} (SIRGAS2000/UTM)</div>
     <div><b>Cena antes:</b> ${resultado.cena_antes.data.substring(0,10)}</div>
     <div><b>Cena depois:</b> ${resultado.cena_depois.data.substring(0,10)}</div>
+    ${degradou ? `<div class="aviso-conferencia" style="margin-top:10px">
+      A área solicitada é grande demais para a resolução nativa do satélite.
+      As bandas foram reamostradas para ${resEfetiva} m/pixel. Para obter a
+      resolução máxima, reduza o <b>raio da área</b> e processe novamente.
+    </div>` : ''}
     <a class="download-link" href="/download/${jobId}" download>⬇ Baixar pacote completo (.zip)</a>
     <div class="aviso-conferencia">
       <strong>Confira antes de usar em documento oficial.</strong>

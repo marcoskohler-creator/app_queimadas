@@ -152,7 +152,9 @@ CONSULTA
   Raio da area..............: {req.raio_km} km
 
 IMAGENS UTILIZADAS
-  Satelite..................: {nome_satelite} ({resultado['resolucao_m']} m/pixel)
+  Satelite..................: {nome_satelite}
+  Resolucao nativa..........: {resultado['resolucao_m']} m/pixel
+  Resolucao efetiva.........: {resultado.get('resolucao_efetiva_m', resultado['resolucao_m'])} m/pixel
   Cena anterior.............: {resultado['cena_antes']['data'][:10]}
   Cena posterior............: {resultado['cena_depois']['data'][:10]}
 
@@ -171,6 +173,13 @@ CONTEUDO DO PACOTE
                     e B12 (infravermelho de ondas curtas) da cena
                     anterior ao evento, em GeoTIFF georreferenciado.
   /bandas/depois .. As mesmas bandas da cena posterior ao evento.
+
+FORMATO DAS BANDAS
+  Tipo de arquivo...........: GeoTIFF, 32-bit float
+  Valores...................: Reflectancia de superficie (analitico)
+  Reamostragem..............: Vizinho mais proximo (sem interpolacao)
+  Equivalente ao download "Analytical / TIFF (32-bit float)" do
+  Copernicus Browser. Pixels sem dado valido: NaN.
 
 RESSALVAS TECNICAS
   Este e um levantamento automatizado e auxiliar, sujeito a imprecisoes.
@@ -269,6 +278,7 @@ def _rodar_job(job_id: str, req: ProcessarRequest):
             "cena_depois": resultado["cena_depois"],
             "satelite_usado": resultado["satelite_usado"],
             "resolucao_m": resultado["resolucao_m"],
+            "resolucao_efetiva_m": resultado.get("resolucao_efetiva_m"),
         }
         JOBS[job_id]["pacote_zip"] = zip_path
         JOBS[job_id]["nome_pacote"] = nome_pacote
