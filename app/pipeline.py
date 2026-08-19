@@ -40,6 +40,13 @@ function evaluatePixel(sample) {
 }
 """
 
+# Parâmetros fixos de qualidade do polígono (não ajustáveis via API/UI).
+# Calibrados para reduzir falso-positivo em área urbana/pixel misto de
+# borda. Alterar aqui exige redeploy, é intencional não expor no formulário.
+LIMIAR_NDVI_VEGETACAO_FIXO = 0.35
+EROSAO_M_FIXO = 3.0
+RESOLUCAO_M_FIXA = 10.0  # resolução (m/pixel) usada em toda a análise
+
 
 def obter_token(client_id, client_secret):
     if not client_id or not client_secret:
@@ -211,7 +218,7 @@ def calcular_nbr(b08, b12):
 
 
 def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
-                                  limiar_dnbr=0.1, limiar_ndvi_vegetacao=0.2):
+                                  limiar_dnbr=0.1, area_minima_m2=500.0):
     b04_antes, b08_antes, b12_antes, mask_antes = dados_antes
     b04_depois, b08_depois, b12_depois, mask_depois = dados_depois
 
@@ -220,11 +227,10 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
     dnbr = nbr_antes - nbr_depois
 
     # Só considera "queimado" um pixel que já era vegetação ANTES do
-    # evento (NDVI pré-fogo acima do limiar). Isso filtra áreas urbanas,
-    # solo exposto e estradas, que têm NDVI baixo mesmo sem incêndio e
-    # podem gerar falso-positivo só pelo dNBR.
+    # evento (NDVI pré-fogo acima do limiar fixo). Filtra áreas urbanas,
+    # solo exposto e estradas, que têm NDVI baixo mesmo sem incêndio.
     ndvi_antes = calcular_ndvi(b08_antes, b04_antes)
-    era_vegetacao = ndvi_antes >= limiar_ndvi_vegetacao
+    era_vegetacao = ndvi_antes >= LIMIAR_NDVI_VEGETACAO_FIXO
 
     valido = (mask_antes > 0) & (mask_depois > 0)
     mascara = ((dnbr >= limiar_dnbr) & valido & era_vegetacao).astype("uint8")
@@ -244,6 +250,32 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
 
     epsg_utm = epsg_sirgas2000_utm(lon, lat)
     gdf_utm = gdf_sirgas.to_crs(epsg=epsg_utm)
+
+    # Erosão fixa (buffer negativo): remove a faixa de borda onde pixels
+    # mistos (metade vegetação, metade estrada/construção) podem ter
+    # passado no filtro de NDVI por estarem no limite.
+    if EROSAO_M_FIXO > 0:
+        geom_erodida = gdf_utm.geometry.buffer(-EROSAO_M_FIXO)
+        geom_erodida = geom_erodida[~geom_erodida.is_empty]
+        if len(geom_erodida) > 0:
+            gdf_utm = gpd.GeoDataFrame(geometry=geom_erodida, crs=gdf_utm.crs)
+
+    # Separa multipolígonos em partes individuais para poder filtrar por
+    # área mínima peça a peça (evita que um fragmento minúsculo de ruído
+    # "carona" num polígono grande escape do filtro).
+    gdf_utm = gdf_utm.explode(index_parts=False).reset_index(drop=True)
+    if area_minima_m2 and area_minima_m2 > 0:
+        gdf_utm = gdf_utm[gdf_utm.geometry.area >= area_minima_m2].reset_index(drop=True)
+
+    if len(gdf_utm) == 0:
+        raise PipelineError(
+            "Todas as áreas detectadas ficaram abaixo do tamanho mínimo "
+            f"({area_minima_m2:.0f} m² / equivalente ao 'filtro_pixels' "
+            "definido). Tente reduzir 'filtro_pixels' "
+            "ou revisar o limiar de dNBR."
+        )
+
+    gdf_sirgas = gdf_utm.to_crs(epsg=4674)
     area_ha_total = float(gdf_utm.geometry.area.sum() / 10000.0)
 
     return gdf_sirgas, area_ha_total, epsg_utm
@@ -252,11 +284,16 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
 def executar_pipeline(data_referencia, latitude, longitude,
                        janela_dias, nuvem_maxima, limiar_dnbr, workdir,
                        client_id, client_secret,
-                       raio_km=3.0, limiar_ndvi_vegetacao=0.2):
+                       raio_km=3.0, filtro_pixels=3):
     """Executa o pipeline completo (via Sentinel Hub) e retorna um dicionário
     com o resultado. client_id/client_secret são as credenciais informadas
-    pelo usuário no próprio formulário (não ficam armazenadas no servidor)."""
+    pelo usuário no próprio formulário (não ficam armazenadas no servidor).
+    NDVI de vegetação e erosão de borda são fixos (ver constantes no topo
+    do arquivo), não ajustáveis via parâmetro. filtro_pixels define a área
+    mínima em número de pixels (cada pixel = RESOLUCAO_M_FIXA²)."""
     os.makedirs(workdir, exist_ok=True)
+
+    area_minima_m2 = max(0, filtro_pixels) * (RESOLUCAO_M_FIXA ** 2)
 
     token = obter_token(client_id, client_secret)
     bbox_wgs84 = calcular_bbox_wgs84(longitude, latitude, raio_km)
@@ -272,7 +309,7 @@ def executar_pipeline(data_referencia, latitude, longitude,
             "de dias definida. Aumente 'janela_dias' ou 'nuvem_maxima'."
         )
 
-    largura_px, altura_px = _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=10)
+    largura_px, altura_px = _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=RESOLUCAO_M_FIXA)
 
     dados_antes_raw, perfil = obter_bandas(
         bbox_wgs84, cena_antes["data"], token, largura_px, altura_px)
@@ -284,7 +321,7 @@ def executar_pipeline(data_referencia, latitude, longitude,
 
     gdf_resultado, area_ha, epsg_utm = gerar_poligono_area_queimada(
         dados_antes, dados_depois, perfil, longitude, latitude,
-        limiar_dnbr=limiar_dnbr, limiar_ndvi_vegetacao=limiar_ndvi_vegetacao,
+        limiar_dnbr=limiar_dnbr, area_minima_m2=area_minima_m2,
     )
 
     caminho_shp = os.path.join(workdir, "area_queimada_sirgas2000.shp")

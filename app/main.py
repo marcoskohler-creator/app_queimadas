@@ -88,10 +88,11 @@ class ProcessarRequest(BaseModel):
     nuvem_maxima: int = 30
     limiar_dnbr: float = 0.1
     raio_km: float = Field(3.0, description="Raio (km) da área ao redor do ponto")
-    limiar_ndvi_vegetacao: float = Field(
-        0.2, description="NDVI mínimo (imagem 'antes') para considerar o "
-                          "pixel vegetação e elegível a virar área queimada — "
-                          "filtra áreas urbanas/solo exposto."
+    filtro_pixels: int = Field(
+        3, description="Filtro por pixel: número mínimo de pixels "
+                        "(~10m cada, ~100 m² por pixel) conectados para "
+                        "considerar uma mancha como área queimada real, "
+                        "descartando ruído/fragmentos menores."
     )
     sentinel_hub_client_id: str = Field(
         ..., description="Client ID do OAuth Client do Sentinel Hub do "
@@ -128,7 +129,7 @@ def _rodar_job(job_id: str, req: ProcessarRequest):
             client_id=req.sentinel_hub_client_id,
             client_secret=req.sentinel_hub_client_secret,
             raio_km=req.raio_km,
-            limiar_ndvi_vegetacao=req.limiar_ndvi_vegetacao,
+            filtro_pixels=req.filtro_pixels,
         )
         # zip do shapefile (shp exige múltiplos arquivos: .shp .shx .dbf .prj)
         base_shp = resultado["shapefile_path"].replace(".shp", "")

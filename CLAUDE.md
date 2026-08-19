@@ -134,10 +134,15 @@ curl http://localhost:8000/status/SEU_JOB_ID
 
 5. **Filtro de vegetação (NDVI) evita falso-positivo em área urbana.**
    Um pixel só entra no polígono se o dNBR passar do limiar **E** o NDVI
-   da imagem "antes" for >= `limiar_ndvi_vegetacao` (padrão 0.2) — ou
-   seja, precisa já ter sido vegetação antes do evento. Não remover essa
-   checagem para "simplificar", ela existe para resolver um problema real
-   relatado (cidade sendo detectada como área queimada).
+   da imagem "antes" for >= `LIMIAR_NDVI_VEGETACAO_FIXO` (constante fixa
+   em `pipeline.py`, atualmente 0.35) — ou seja, precisa já ter sido
+   vegetação antes do evento. Além disso, o polígono final passa por uma
+   **erosão fixa** (`EROSAO_M_FIXO`, 3m) que remove a faixa de borda onde
+   pixels mistos (parte vegetação, parte estrada/construção) podem
+   escapar do filtro de NDVI. Essas duas constantes são intencionalmente
+   **fixas, não expostas via API/formulário** — alterar exige mexer no
+   código e redeploy. Só `filtro_pixels` (área mínima expressa em número
+   de pixels conectados, não em m²) é ajustável pelo usuário.
 
 6. **Estado de jobs é em memória (`JOBS = {}` em `main.py`).** Isso é uma
    limitação conhecida e aceita para uso local/individual — não é algo a
@@ -174,8 +179,14 @@ curl http://localhost:8000/status/SEU_JOB_ID
   calcular área.
 - Limiar padrão de dNBR: `0.1` (calibrado pelo usuário) — ajustável via
   parâmetro da API, não hardcoded em outro lugar do código.
-- Limiar padrão de NDVI-vegetação: `0.2` — mesmo princípio, ajustável via
-  parâmetro, não hardcoded.
+- Limiar padrão de NDVI-vegetação: `0.35` — **fixo em código**
+  (`LIMIAR_NDVI_VEGETACAO_FIXO` em `pipeline.py`), não exposto via API/UI.
+- Erosão de borda: `3m` — **fixo em código** (`EROSAO_M_FIXO`), mesmo
+  motivo.
+- Filtro por pixel padrão: `3` pixels (~300 m², resolução de 10m/pixel via
+  `RESOLUCAO_M_FIXA`) — esse sim é ajustável via parâmetro `filtro_pixels`
+  (API e formulário). A conversão pixels→m² acontece em
+  `executar_pipeline()`, nunca hardcoded em outro lugar.
 - Coordenadas no frontend aceitam **graus decimais e graus/minutos/
   segundos** (conversão feita em JS puro em `static/index.html`, sem
   chamada ao backend).
