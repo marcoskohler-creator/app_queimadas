@@ -176,15 +176,27 @@
   #resultado { margin-top: 10px; font-size: 13px; line-height: 1.6; }
   #resultado b { color: var(--accent-soft); }
   a.download-link {
-    display: inline-block;
+    display: block;
     margin-top: 10px;
     color: var(--accent);
     font-size: 13px;
     text-decoration: none;
     border: 1px solid var(--accent);
-    padding: 6px 10px;
+    padding: 8px 10px;
     border-radius: 6px;
+    text-align: center;
   }
+  .aviso-conferencia {
+    margin-top: 14px;
+    padding: 11px 13px;
+    border-radius: 6px;
+    background: #241a12;
+    border-left: 3px solid var(--accent);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+  .aviso-conferencia strong { color: var(--accent-soft); }
   .hint {
     font-size: 11px;
     color: var(--muted);
@@ -317,6 +329,14 @@
     Clique em qualquer ponto do mapa para definir latitude/longitude automaticamente.
     O processamento pode levar alguns minutos (busca das imagens de satélite + cálculo).
   </p>
+
+  <div class="aviso-conferencia">
+    <strong>Levantamento auxiliar.</strong> O resultado é gerado
+    automaticamente e pode conter imprecisões. Antes de usar em relatório,
+    perícia ou documento oficial, confira a delimitação em software de
+    geoprocessamento (QGIS, ArcGIS) — o sistema disponibiliza o shapefile e
+    as bandas em GeoTIFF para essa conferência — e valide com vistoria em campo.
+  </div>
 
   <div id="autoria">
     <strong>Corpo de Bombeiros Militar de Minas Gerais</strong><br />
@@ -516,7 +536,14 @@ function mostrarResultado(jobId, resultado) {
     <div><b>CRS usado no cálculo:</b> EPSG:${resultado.epsg_utm_usado} (SIRGAS2000/UTM)</div>
     <div><b>Cena antes:</b> ${resultado.cena_antes.data.substring(0,10)}</div>
     <div><b>Cena depois:</b> ${resultado.cena_depois.data.substring(0,10)}</div>
-    <a class="download-link" href="/download/${jobId}" download>⬇ Baixar Shapefile (.zip)</a>
+    <a class="download-link" href="/download/${jobId}" download>⬇ Baixar pacote completo (.zip)</a>
+    <div class="aviso-conferencia">
+      <strong>Confira antes de usar em documento oficial.</strong>
+      Este é um levantamento automatizado e auxiliar. O pacote inclui o
+      polígono e as bandas B04/B08/B12 em GeoTIFF — recomenda-se abri-los
+      em software de geoprocessamento (QGIS, ArcGIS) para conferir a
+      delimitação, e validar com vistoria em campo.
+    </div>
   `;
 
   fetch('/geojson/' + jobId)

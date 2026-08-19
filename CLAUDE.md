@@ -190,6 +190,20 @@ curl http://localhost:8000/status/SEU_JOB_ID
     → baixar) acontece na mesma sessão viva da instância — não
     "corrigir" adicionando disco pago sem que isso seja pedido.
 
+11. **Download das bandas em GeoTIFF (`salvar_bandas_geotiff`)** —
+    gera B04/B08/B12 de cada data como GeoTIFF float32 com nodata=NaN,
+    zipado em `/download-bandas/{job_id}`. Foi implementado sem execução
+    de teste local (rasterio indisponível no ambiente de desenvolvimento
+    da sessão) — se falhar, checar primeiro o dict `perfil_saida` contra
+    o perfil real retornado por `obter_bandas`/`obter_bandas_landsat`
+    (chaves `crs` e `transform` precisam existir e ser válidas).
+
+12. **Aviso de conferência é requisito, não enfeite.** O bloco
+    `.aviso-conferencia` aparece em dois lugares (sidebar fixa e no
+    resultado do processamento) e declara que o levantamento é auxiliar,
+    exigindo conferência em GIS e vistoria em campo. Não remover nem
+    suavizar — é salvaguarda para uso pericial/oficial.
+
 ## Padrões do projeto (não alterar sem necessidade)
 
 - CRS de saída do shapefile: **sempre EPSG:4674 (SIRGAS2000)**.

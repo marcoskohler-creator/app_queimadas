@@ -469,6 +469,40 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
     return gdf_sirgas, area_ha_total, epsg_utm
 
 
+def salvar_bandas_geotiff(dados, perfil, workdir, sufixo):
+    """
+    Salva as bandas (B04/vermelho, B08/NIR, B12/SWIR2) como arquivos
+    GeoTIFF georreferenciados, prontos para abrir em QGIS/ArcGIS e
+    permitir conferência independente do resultado.
+
+    dados: tupla (b04, b08, b12, dataMask)
+    sufixo: "antes" ou "depois"
+    Retorna dict {nome_banda: caminho}.
+    """
+    b04, b08, b12, _mask = dados
+    bandas = {"B04_vermelho": b04, "B08_nir": b08, "B12_swir2": b12}
+    caminhos = {}
+
+    for nome, matriz in bandas.items():
+        caminho = os.path.join(workdir, f"{nome}_{sufixo}.tif")
+        perfil_saida = {
+            "driver": "GTiff",
+            "height": matriz.shape[0],
+            "width": matriz.shape[1],
+            "count": 1,
+            "dtype": "float32",
+            "crs": perfil["crs"],
+            "transform": perfil["transform"],
+            "nodata": np.nan,
+            "compress": "deflate",
+        }
+        with rasterio.open(caminho, "w", **perfil_saida) as dst:
+            dst.write(matriz.astype("float32"), 1)
+        caminhos[f"{nome}_{sufixo}"] = caminho
+
+    return caminhos
+
+
 def executar_pipeline(data_referencia, latitude, longitude,
                        janela_dias, nuvem_maxima, limiar_dnbr, workdir,
                        client_id=None, client_secret=None,
@@ -552,6 +586,12 @@ def executar_pipeline(data_referencia, latitude, longitude,
     caminho_geojson = os.path.join(workdir, "area_queimada.geojson")
     gdf_resultado.to_file(caminho_geojson, driver="GeoJSON")
 
+    # Salva as bandas usadas no cálculo como GeoTIFF, para permitir
+    # conferência independente do resultado em software de GIS.
+    caminhos_bandas = {}
+    caminhos_bandas.update(salvar_bandas_geotiff(dados_antes, perfil, workdir, "antes"))
+    caminhos_bandas.update(salvar_bandas_geotiff(dados_depois, perfil, workdir, "depois"))
+
     # Remove URLs de asset do dict de retorno da cena (poluem o JSON de resposta)
     cena_antes_out = {k: v for k, v in cena_antes.items() if k != "assets"}
     cena_depois_out = {k: v for k, v in cena_depois.items() if k != "assets"}
@@ -567,4 +607,5 @@ def executar_pipeline(data_referencia, latitude, longitude,
         "bbox_consultado": bbox_wgs84,
         "shapefile_path": caminho_shp,
         "geojson_path": caminho_geojson,
+        "bandas_paths": caminhos_bandas,
     }
