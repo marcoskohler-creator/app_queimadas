@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: area-queimada-sentinel2
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
