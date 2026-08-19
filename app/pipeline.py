@@ -44,7 +44,6 @@ function evaluatePixel(sample) {
 # Calibrados para reduzir falso-positivo em área urbana/pixel misto de
 # borda. Alterar aqui exige redeploy, é intencional não expor no formulário.
 LIMIAR_NDVI_VEGETACAO_FIXO = 0.35
-EROSAO_M_FIXO = 3.0
 RESOLUCAO_M_FIXA = 10.0  # resolução (m/pixel) usada em toda a análise
 
 
@@ -251,15 +250,6 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
     epsg_utm = epsg_sirgas2000_utm(lon, lat)
     gdf_utm = gdf_sirgas.to_crs(epsg=epsg_utm)
 
-    # Erosão fixa (buffer negativo): remove a faixa de borda onde pixels
-    # mistos (metade vegetação, metade estrada/construção) podem ter
-    # passado no filtro de NDVI por estarem no limite.
-    if EROSAO_M_FIXO > 0:
-        geom_erodida = gdf_utm.geometry.buffer(-EROSAO_M_FIXO)
-        geom_erodida = geom_erodida[~geom_erodida.is_empty]
-        if len(geom_erodida) > 0:
-            gdf_utm = gpd.GeoDataFrame(geometry=geom_erodida, crs=gdf_utm.crs)
-
     # Separa multipolígonos em partes individuais para poder filtrar por
     # área mínima peça a peça (evita que um fragmento minúsculo de ruído
     # "carona" num polígono grande escape do filtro).
@@ -288,7 +278,7 @@ def executar_pipeline(data_referencia, latitude, longitude,
     """Executa o pipeline completo (via Sentinel Hub) e retorna um dicionário
     com o resultado. client_id/client_secret são as credenciais informadas
     pelo usuário no próprio formulário (não ficam armazenadas no servidor).
-    NDVI de vegetação e erosão de borda são fixos (ver constantes no topo
+    NDVI de vegetação é fixo (ver constante no topo
     do arquivo), não ajustáveis via parâmetro. filtro_pixels define a área
     mínima em número de pixels (cada pixel = RESOLUCAO_M_FIXA²)."""
     os.makedirs(workdir, exist_ok=True)
