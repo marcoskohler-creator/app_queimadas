@@ -100,16 +100,13 @@ curl http://localhost:8000/status/SEU_JOB_ID
 
 ## Pontos de atenção conhecidos (leia antes de "consertar" algo)
 
-0. **NOVO E NÃO TESTADO EM PRODUÇÃO: suporte a Landsat.** Implementado via
-   Earth Search (Element84/AWS), API STAC pública (`EARTH_SEARCH_URL`),
-   sem credencial. Riscos conhecidos, ainda não confirmados:
-   - **Bucket "requester pays"**: incerto se os assets do Landsat na AWS
-     exigem credencial AWS própria (bucket requester-pays) ou são
-     públicos. O código já detecta isso (checa se a URL do asset começa
-     com `s3://` em vez de `https://`) e falha com mensagem clara — se
-     acontecer, a solução não é "consertar" a leitura, é decidir se vale
-     a pena adicionar credenciais AWS (contraria o objetivo de "sem
-     credencial") ou aceitar Landsat como indisponível.
+0. **NOVO E PARCIALMENTE TESTADO: suporte a Landsat.** A primeira versão
+   usava AWS Earth Search e falhou em produção: bucket é **confirmadamente
+   requester-pays** (exigiria credencial AWS). Trocado para **Microsoft
+   Planetary Computer** (`PC_STAC_SEARCH_URL` + `PC_SIGN_URL`), que é
+   público de verdade — exige só assinar cada URL de asset num endpoint
+   sem autenticação (`_assinar_url_planetary_computer()`) antes de ler.
+   Riscos que ainda não foram confirmados ao vivo:
    - **Nomes de asset** (`red`, `nir08`, `swir22`, `qa_pixel`) foram
      confirmados via documentação externa, não testados ao vivo — se a
      API mudar nomenclatura, `obter_bandas_landsat()` falha com KeyError
