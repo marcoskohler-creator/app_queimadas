@@ -100,6 +100,28 @@ curl http://localhost:8000/status/SEU_JOB_ID
 
 ## Pontos de atenção conhecidos (leia antes de "consertar" algo)
 
+0. **NOVO E NÃO TESTADO EM PRODUÇÃO: suporte a Landsat.** Implementado via
+   Earth Search (Element84/AWS), API STAC pública (`EARTH_SEARCH_URL`),
+   sem credencial. Riscos conhecidos, ainda não confirmados:
+   - **Bucket "requester pays"**: incerto se os assets do Landsat na AWS
+     exigem credencial AWS própria (bucket requester-pays) ou são
+     públicos. O código já detecta isso (checa se a URL do asset começa
+     com `s3://` em vez de `https://`) e falha com mensagem clara — se
+     acontecer, a solução não é "consertar" a leitura, é decidir se vale
+     a pena adicionar credenciais AWS (contraria o objetivo de "sem
+     credencial") ou aceitar Landsat como indisponível.
+   - **Nomes de asset** (`red`, `nir08`, `swir22`, `qa_pixel`) foram
+     confirmados via documentação externa, não testados ao vivo — se a
+     API mudar nomenclatura, `obter_bandas_landsat()` falha com KeyError
+     claro indicando qual asset sumiu.
+   - **Escala/offset de refletância** (`LANDSAT_SR_ESCALA`,
+     `LANDSAT_SR_OFFSET`) seguem a fórmula oficial USGS para Collection 2
+     Level-2 — se os valores de NBR/NDVI saírem visivelmente errados
+     (fora de -1 a 1), esse é o primeiro lugar a checar.
+   - **Bits de QA_PIXEL** (`LANDSAT_QA_MASCARA_INVALIDA`) cobrem fill,
+     dilated cloud, cloud e cloud shadow — não cobre neve/gelo
+     explicitamente, o que pode ser relevante dependendo da região/época.
+
 1. **GDAL é a causa mais provável de erro, com ou sem Docker.** Com Docker,
    o `Dockerfile` usa `ghcr.io/osgeo/gdal:ubuntu-small-3.9.2` como base
    para evitar compilar GDAL na mão. Sem Docker, use `environment.yml`

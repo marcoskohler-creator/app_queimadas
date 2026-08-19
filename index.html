@@ -2,7 +2,7 @@
 <html lang="pt-br">
 <head>
 <meta charset="UTF-8" />
-<title>Área Queimada — CBMMG · Sentinel-2</title>
+<title>Mapeamento de Cicatriz de Incêndio — CBMMG</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <style>
@@ -60,6 +60,16 @@
     color: var(--text);
     font-size: 13px;
   }
+  select#satelite {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #2c3a32;
+    background: #0f1512;
+    color: var(--text);
+    font-size: 13px;
+    margin-top: 14px;
+  }
   .row { display: flex; gap: 10px; }
   .row > div { flex: 1; }
   #cabecalho {
@@ -69,8 +79,8 @@
     margin-bottom: 6px;
   }
   #cabecalho img {
-    width: 44px;
-    height: 44px;
+    width: 76px;
+    height: 76px;
     flex-shrink: 0;
   }
   #cabecalho-textos h1 { margin: 0; }
@@ -189,10 +199,19 @@
   <div id="cabecalho">
     <img src="/img/logo_cbmmg.png" alt="Brasão CBMMG" />
     <div id="cabecalho-textos">
-      <h1>🔥 Área Queimada — Sentinel-2</h1>
-      <p class="subtitle">dNBR (B08/B12) · Saída em SIRGAS2000 (EPSG:4674)</p>
+      <h1>Mapeamento de Cicatriz de Incêndio</h1>
+      <p class="subtitle">
+        Delimitação e quantificação de área queimada por dNBR —
+        Sentinel-2 (B08/B12) · Saída em SIRGAS2000 (EPSG:4674)
+      </p>
     </div>
   </div>
+
+  <label>Satélite</label>
+  <select id="satelite" onchange="mudarSatelite()">
+    <option value="sentinel2" selected>Sentinel-2 — 10m, exige credenciais</option>
+    <option value="landsat">Landsat 8/9 — 30m, sem credenciais</option>
+  </select>
 
   <details id="credenciais-box">
     <summary>🔑 Suas credenciais Sentinel Hub (obrigatório)</summary>
@@ -210,6 +229,13 @@
     <label>Client Secret</label>
     <input id="sh_client_secret" type="password" placeholder="••••••••••••••••" autocomplete="off" />
   </details>
+
+  <p id="aviso-landsat" class="hint" style="display:none; margin-top: 6px;">
+    Landsat não exige credenciais (fonte pública). Resolução de 30m —
+    contornos menos detalhados que o Sentinel-2, útil quando não há cena
+    Sentinel-2 disponível (nuvem/janela de tempo) ou se preferir não usar
+    credencial própria.
+  </p>
 
   <div class="tabs">
     <button type="button" class="tab-btn active" id="tab-decimal" onclick="mudarModoCoord('decimal')">Graus decimais</button>
@@ -274,6 +300,12 @@
   <label>Raio da área (km)</label>
   <input id="raio_km" type="number" step="0.5" value="3" />
 
+  <label>Filtro por pixel (mín. de pixels conectados)</label>
+  <input id="filtro_pixels" type="number" step="1" min="1" value="3" />
+
+  <label>Preencher falhas internas (máx. de pixels)</label>
+  <input id="preencher_falhas" type="number" step="1" min="0" value="5" />
+
   <button id="btn-processar">Processar</button>
 
   <div id="status-box">
@@ -288,7 +320,7 @@
 
   <div id="autoria">
     <strong>Corpo de Bombeiros Militar de Minas Gerais</strong><br />
-    Autoria: 3º SGT BM Marcos Antonio de Souza Junior — Mat. 148.070-6
+    3º SGT BM Marcos A. de Souza Junior — 148.070-6
   </div>
 </div>
 
@@ -311,6 +343,20 @@ function mudarModoCoord(modo) {
   document.getElementById('modo-gms').style.display = (modo === 'gms') ? 'block' : 'none';
   document.getElementById('tab-decimal').classList.toggle('active', modo === 'decimal');
   document.getElementById('tab-gms').classList.toggle('active', modo === 'gms');
+}
+
+function mudarSatelite() {
+  const satelite = document.getElementById('satelite').value;
+  const caixaCredenciais = document.getElementById('credenciais-box');
+  const avisoLandsat = document.getElementById('aviso-landsat');
+
+  if (satelite === 'landsat') {
+    caixaCredenciais.style.display = 'none';
+    avisoLandsat.style.display = 'block';
+  } else {
+    caixaCredenciais.style.display = 'block';
+    avisoLandsat.style.display = 'none';
+  }
 }
 
 function decimalParaGms(valor) {
@@ -386,6 +432,9 @@ btn.addEventListener('click', async () => {
   const nuvem = parseInt(document.getElementById('nuvem').value || "30");
   const limiar = parseFloat(document.getElementById('limiar').value || "0.1");
   const raioKm = parseFloat(document.getElementById('raio_km').value || "3");
+  const filtroPixels = parseInt(document.getElementById('filtro_pixels').value || "3");
+  const preencherFalhas = parseInt(document.getElementById('preencher_falhas').value || "5");
+  const satelite = document.getElementById('satelite').value;
   const shClientId = document.getElementById('sh_client_id').value.trim();
   const shClientSecret = document.getElementById('sh_client_secret').value.trim();
 
@@ -393,8 +442,8 @@ btn.addEventListener('click', async () => {
     alert("Preencha latitude, longitude e data de referência.");
     return;
   }
-  if (!shClientId || !shClientSecret) {
-    alert("Preencha suas credenciais Sentinel Hub (Client ID e Client Secret) na seção acima.");
+  if (satelite === 'sentinel2' && (!shClientId || !shClientSecret)) {
+    alert("Preencha suas credenciais Sentinel Hub (Client ID e Client Secret) na seção acima, ou selecione o satélite Landsat, que não exige credenciais.");
     document.getElementById('credenciais-box').open = true;
     return;
   }
@@ -417,8 +466,11 @@ btn.addEventListener('click', async () => {
         nuvem_maxima: nuvem,
         limiar_dnbr: limiar,
         raio_km: raioKm,
-        sentinel_hub_client_id: shClientId,
-        sentinel_hub_client_secret: shClientSecret
+        filtro_pixels: filtroPixels,
+        preencher_falhas_pixels: preencherFalhas,
+        satelite: satelite,
+        sentinel_hub_client_id: shClientId || null,
+        sentinel_hub_client_secret: shClientSecret || null
       })
     });
     const data = await resp.json();
@@ -456,7 +508,9 @@ async function pollStatus(jobId) {
 }
 
 function mostrarResultado(jobId, resultado) {
+  const nomeSatelite = resultado.satelite_usado === 'landsat' ? 'Landsat 8/9' : 'Sentinel-2';
   resultadoDiv.innerHTML = `
+    <div><b>Satélite usado:</b> ${nomeSatelite} (${resultado.resolucao_m}m/pixel)</div>
     <div><b>Área queimada:</b> ${resultado.area_ha.toLocaleString('pt-BR')} ha</div>
     <div><b>CRS saída (polígono):</b> EPSG:${resultado.epsg_saida} (SIRGAS2000)</div>
     <div><b>CRS usado no cálculo:</b> EPSG:${resultado.epsg_utm_usado} (SIRGAS2000/UTM)</div>

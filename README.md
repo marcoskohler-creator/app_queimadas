@@ -8,6 +8,16 @@ e retorna:
 1. Shapefile georreferenciado em **SIRGAS2000 (EPSG:4674)**
 2. Área queimada em **hectares** (calculada em SIRGAS2000/UTM, zona automática)
 
+## Satélites disponíveis
+
+- **Sentinel-2** (10m/pixel, padrão): via Sentinel Hub, exige credencial
+  própria do usuário (ver seção abaixo).
+- **Landsat 8/9** (30m/pixel): via Earth Search (Element84/AWS), API
+  pública, **sem necessidade de credencial nenhuma**. Boa alternativa
+  quando não há cena Sentinel-2 disponível na janela de datas, ou para
+  quem não quer criar conta no Copernicus. Contorno menos detalhado por
+  causa da resolução mais grossa.
+
 ## Modelo de credenciais: cada usuário usa as próprias
 
 O servidor **não guarda nenhuma credencial do Sentinel Hub**. Cada pessoa

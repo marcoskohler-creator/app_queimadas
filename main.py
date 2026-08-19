@@ -6,6 +6,8 @@ import secrets
 import traceback
 from datetime import datetime
 
+from typing import Optional
+
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -88,17 +90,29 @@ class ProcessarRequest(BaseModel):
     nuvem_maxima: int = 30
     limiar_dnbr: float = 0.1
     raio_km: float = Field(3.0, description="Raio (km) da área ao redor do ponto")
-    limiar_ndvi_vegetacao: float = Field(
-        0.2, description="NDVI mínimo (imagem 'antes') para considerar o "
-                          "pixel vegetação e elegível a virar área queimada — "
-                          "filtra áreas urbanas/solo exposto."
+    filtro_pixels: int = Field(
+        3, description="Filtro por pixel: número mínimo de pixels "
+                        "(~10m cada, ~100 m² por pixel) conectados para "
+                        "considerar uma mancha como área queimada real, "
+                        "descartando ruído/fragmentos menores."
     )
-    sentinel_hub_client_id: str = Field(
-        ..., description="Client ID do OAuth Client do Sentinel Hub do "
-                          "próprio usuário (não fica armazenado no servidor)."
+    preencher_falhas_pixels: int = Field(
+        5, description="Preenchimento de falhas: tamanho máximo (em pixels) "
+                        "de um buraco interno ao polígono que será "
+                        "preenchido. Buracos maiores são preservados como "
+                        "área não queimada."
     )
-    sentinel_hub_client_secret: str = Field(
-        ..., description="Client Secret correspondente."
+    satelite: str = Field(
+        "sentinel2", description="'sentinel2' (10m, exige credenciais) ou "
+                                  "'landsat' (30m, sem credenciais)."
+    )
+    sentinel_hub_client_id: Optional[str] = Field(
+        None, description="Obrigatório se satelite='sentinel2'. Client ID "
+                           "do OAuth Client do Sentinel Hub do próprio "
+                           "usuário (não fica armazenado no servidor)."
+    )
+    sentinel_hub_client_secret: Optional[str] = Field(
+        None, description="Obrigatório se satelite='sentinel2'."
     )
 
 
@@ -111,6 +125,16 @@ def _validar_request(req: ProcessarRequest):
         raise HTTPException(400, "latitude inválida")
     if not (-180 <= req.longitude <= 180):
         raise HTTPException(400, "longitude inválida")
+    if req.satelite not in ("sentinel2", "landsat"):
+        raise HTTPException(400, "satelite deve ser 'sentinel2' ou 'landsat'")
+    if req.satelite == "sentinel2" and (
+        not req.sentinel_hub_client_id or not req.sentinel_hub_client_secret
+    ):
+        raise HTTPException(
+            400, "sentinel_hub_client_id/sentinel_hub_client_secret são "
+                 "obrigatórios quando satelite='sentinel2'. Para usar sem "
+                 "credenciais, selecione satelite='landsat'."
+        )
 
 
 def _rodar_job(job_id: str, req: ProcessarRequest):
@@ -128,7 +152,9 @@ def _rodar_job(job_id: str, req: ProcessarRequest):
             client_id=req.sentinel_hub_client_id,
             client_secret=req.sentinel_hub_client_secret,
             raio_km=req.raio_km,
-            limiar_ndvi_vegetacao=req.limiar_ndvi_vegetacao,
+            filtro_pixels=req.filtro_pixels,
+            preencher_falhas_pixels=req.preencher_falhas_pixels,
+            satelite=req.satelite,
         )
         # zip do shapefile (shp exige múltiplos arquivos: .shp .shx .dbf .prj)
         base_shp = resultado["shapefile_path"].replace(".shp", "")
@@ -146,6 +172,8 @@ def _rodar_job(job_id: str, req: ProcessarRequest):
             "epsg_utm_usado": resultado["epsg_utm_usado"],
             "cena_antes": resultado["cena_antes"],
             "cena_depois": resultado["cena_depois"],
+            "satelite_usado": resultado["satelite_usado"],
+            "resolucao_m": resultado["resolucao_m"],
         }
         JOBS[job_id]["shapefile_zip"] = zip_path
         JOBS[job_id]["geojson_path"] = resultado["geojson_path"]

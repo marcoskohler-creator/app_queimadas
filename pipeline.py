@@ -1,10 +1,12 @@
 """
-Núcleo do pipeline de detecção de área queimada via Sentinel-2 (dNBR).
+Núcleo do pipeline de detecção de área queimada via satélite (dNBR).
 
-Versão 2: usa a API do Sentinel Hub (Catalog API para buscar cenas +
-Process API para obter B08/B12 já recortadas na área de interesse como
-GeoTIFF), autenticando com client_credentials (OAuth Client do Sentinel
-Hub Dashboard). Evita baixar produtos SAFE inteiros.
+Suporta dois satélites, com o mesmo cálculo de dNBR/NDVI ao final:
+
+- Sentinel-2 (10m/pixel): via Sentinel Hub (Catalog API + Process API),
+  exige credenciais do usuário (Client ID/Secret do Sentinel Hub).
+- Landsat 8/9 (30m/pixel): via Earth Search (Element84/AWS), API STAC
+  pública, SEM necessidade de credencial nenhuma.
 """
 import os
 import math
@@ -12,16 +14,19 @@ import datetime as dt
 
 import numpy as np
 import requests
+import rasterio
 from rasterio.io import MemoryFile
 from rasterio.features import shapes as rio_shapes
+from rasterio.windows import from_bounds as janela_de_bounds, transform as transform_da_janela
 import geopandas as gpd
-from shapely.geometry import shape
+from shapely.geometry import shape, Polygon
 from pyproj import Transformer
 
 TOKEN_URL = ("https://identity.dataspace.copernicus.eu/auth/realms/CDSE/"
              "protocol/openid-connect/token")
 SH_CATALOG_URL = "https://sh.dataspace.copernicus.eu/catalog/v1/search"
 SH_PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
+EARTH_SEARCH_URL = "https://earth-search.aws.element84.com/v1/search"
 
 class PipelineError(Exception):
     pass
@@ -39,6 +44,22 @@ function evaluatePixel(sample) {
   return [sample.B04, sample.B08, sample.B12, sample.dataMask];
 }
 """
+
+# Parâmetros fixos de qualidade do polígono (não ajustáveis via API/UI).
+# Calibrados para reduzir falso-positivo em área urbana/pixel misto de
+# borda. Alterar aqui exige redeploy, é intencional não expor no formulário.
+LIMIAR_NDVI_VEGETACAO_FIXO = 0.35
+RESOLUCAO_M_SENTINEL2 = 10.0
+RESOLUCAO_M_LANDSAT = 30.0
+
+# Escala/offset oficiais USGS para converter DN -> refletância de
+# superfície nos produtos Landsat Collection 2 Level-2 (bandas óticas).
+LANDSAT_SR_ESCALA = 0.0000275
+LANDSAT_SR_OFFSET = -0.2
+
+# Bits de QA_PIXEL (Landsat C2 L2) considerados inválidos para a análise:
+# fill(0) + dilated cloud(1) + cloud(3) + cloud shadow(4).
+LANDSAT_QA_MASCARA_INVALIDA = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4)
 
 
 def obter_token(client_id, client_secret):
@@ -194,6 +215,137 @@ def obter_bandas(bbox_wgs84, data_iso, token, largura_px, altura_px):
     return dados, perfil
 
 
+# =============================================================================
+# LANDSAT 8/9 — via Earth Search (Element84/AWS), API STAC pública, sem
+# necessidade de credencial. Cenas Collection 2 Level-2 (reflectância de
+# superfície já corrigida), Cloud-Optimized GeoTIFF lidos via HTTP direto
+# (GDAL faz leitura parcial/"windowed" sem baixar o arquivo inteiro).
+# =============================================================================
+
+def buscar_cena_landsat(bbox_wgs84, data_ref, direcao, janela_dias=30, nuvem_max=30):
+    """
+    Busca no Earth Search (STAC) a cena Landsat Collection 2 Level-2 mais
+    próxima da data_ref, ANTES ou DEPOIS, cobrindo o bbox informado.
+    Não exige autenticação (API pública).
+    """
+    data_ref_dt = dt.datetime.strptime(data_ref, "%Y-%m-%d")
+
+    if direcao == "before":
+        data_ini = (data_ref_dt - dt.timedelta(days=janela_dias)).strftime("%Y-%m-%dT00:00:00Z")
+        data_fim = data_ref_dt.strftime("%Y-%m-%dT23:59:59Z")
+    else:
+        data_ini = data_ref_dt.strftime("%Y-%m-%dT00:00:00Z")
+        data_fim = (data_ref_dt + dt.timedelta(days=janela_dias)).strftime("%Y-%m-%dT23:59:59Z")
+
+    corpo = {
+        "collections": ["landsat-c2-l2"],
+        "bbox": bbox_wgs84,
+        "datetime": f"{data_ini}/{data_fim}",
+        "limit": 30,
+        "query": {"eo:cloud_cover": {"lt": nuvem_max}},
+    }
+    r = requests.post(EARTH_SEARCH_URL, json=corpo)
+    if r.status_code != 200:
+        raise PipelineError(
+            f"Erro no Earth Search ({r.status_code}) ao buscar cena "
+            f"Landsat '{direcao}': {r.text[:500]}"
+        )
+    features = r.json().get("features", [])
+    if not features:
+        return None
+
+    features.sort(key=lambda f: f["properties"]["datetime"],
+                   reverse=(direcao == "before"))
+    feat = features[0]
+    return {
+        "id": feat["id"],
+        "data": feat["properties"]["datetime"],
+        "nuvem": feat["properties"].get("eo:cloud_cover"),
+        "assets": feat["assets"],  # dict com URLs das bandas (COG na AWS)
+    }
+
+
+def _ler_janela_remota(url, bbox_wgs84):
+    """
+    Abre um Cloud-Optimized GeoTIFF remoto (HTTP) e lê só a janela
+    correspondente ao bbox informado, sem baixar a cena inteira. Retorna
+    o array 2D recortado e o perfil rasterio (transform/crs) da janela.
+    """
+    with rasterio.open(url) as src:
+        transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+        x_min, y_min = transformer.transform(bbox_wgs84[0], bbox_wgs84[1])
+        x_max, y_max = transformer.transform(bbox_wgs84[2], bbox_wgs84[3])
+
+        janela = janela_de_bounds(x_min, y_min, x_max, y_max, transform=src.transform)
+        dados = src.read(1, window=janela, boundless=True, fill_value=0)
+        transform_janela = transform_da_janela(janela, src.transform)
+
+        perfil = {
+            "transform": transform_janela,
+            "crs": src.crs,
+            "height": dados.shape[0],
+            "width": dados.shape[1],
+        }
+    return dados.astype("float32"), perfil
+
+
+def obter_bandas_landsat(assets, bbox_wgs84):
+    """
+    Lê as bandas equivalentes (vermelho, NIR, SWIR2) + QA_PIXEL de uma
+    cena Landsat, recortadas na área de interesse, e devolve no MESMO
+    formato usado pelo Sentinel-2: array (4, H, W) = [B04, B08, B12,
+    dataMask] + perfil. Isso permite reaproveitar sem alteração o resto
+    do pipeline (cálculo de NBR/NDVI e vetorização).
+
+    Conversão DN -> refletância de superfície usa a escala/offset oficial
+    USGS para produtos Collection 2 Level-2 (necessário para o cálculo de
+    NBR/NDVI ficar correto — a razão entre bandas NÃO é invariante à
+    escala quando há offset aditivo).
+    """
+    try:
+        url_vermelho = assets["red"]["href"]
+        url_nir = assets["nir08"]["href"]
+        url_swir2 = assets["swir22"]["href"]
+        url_qa = assets["qa_pixel"]["href"]
+    except KeyError as e:
+        raise PipelineError(f"Asset de banda Landsat não encontrado: {e}")
+
+    # Se o asset vier como s3:// (em vez de https://), o bucket é
+    # "requester pays" e exigiria credenciais AWS próprias - que este
+    # pipeline não usa por design (Landsat deveria ser "sem credencial").
+    # Falha aqui com mensagem clara em vez de um erro de rede confuso.
+    for nome_banda, url in [("red", url_vermelho), ("nir08", url_nir),
+                             ("swir22", url_swir2), ("qa_pixel", url_qa)]:
+        if url.startswith("s3://"):
+            raise PipelineError(
+                f"O asset '{nome_banda}' desta cena Landsat está em bucket "
+                "AWS 'requester pays' (URL s3://), que exige credenciais "
+                "AWS próprias - não suportado nesta versão. Tente novamente "
+                "mais tarde ou use o satélite Sentinel-2."
+            )
+
+    dn_vermelho, perfil = _ler_janela_remota(url_vermelho, bbox_wgs84)
+    dn_nir, _ = _ler_janela_remota(url_nir, bbox_wgs84)
+    dn_swir2, _ = _ler_janela_remota(url_swir2, bbox_wgs84)
+    qa, _ = _ler_janela_remota(url_qa, bbox_wgs84)
+
+    def para_refletancia(dn):
+        refl = dn * LANDSAT_SR_ESCALA + LANDSAT_SR_OFFSET
+        refl[dn == 0] = np.nan  # 0 = sem dado nos produtos Collection 2
+        return refl
+
+    b04 = para_refletancia(dn_vermelho)
+    b08 = para_refletancia(dn_nir)
+    b12 = para_refletancia(dn_swir2)
+
+    qa_int = qa.astype("uint32")
+    data_mask = np.where((qa_int & LANDSAT_QA_MASCARA_INVALIDA) == 0, 1.0, 0.0).astype("float32")
+    data_mask[np.isnan(b04) | np.isnan(b08) | np.isnan(b12)] = 0.0
+
+    dados = np.stack([b04, b08, b12, data_mask])  # (4, H, W), mesmo formato do Sentinel-2
+    return dados, perfil
+
+
 def calcular_ndvi(b08, b04):
     b08 = b08.astype("float32")
     b04 = b04.astype("float32")
@@ -210,8 +362,33 @@ def calcular_nbr(b08, b12):
     return (b08 - b12) / denom
 
 
+def preencher_falhas_internas(geometria, area_maxima_falha_m2):
+    """
+    Preenche buracos (interior rings) pequenos dentro de um polígono.
+
+    Buracos pequenos costumam ser ruído: pixels isolados dentro da mancha
+    queimada que ficaram logo abaixo do limiar de dNBR/NDVI. Buracos
+    grandes são preservados, porque tendem a representar áreas realmente
+    não atingidas (clareira, açude, afloramento rochoso, ilha de mata que
+    não queimou) — preenchê-los inflaria a área medida indevidamente.
+    """
+    if geometria.geom_type != "Polygon":
+        return geometria
+    if not geometria.interiors:
+        return geometria
+
+    # Mantém apenas os buracos GRANDES (áreas genuinamente não queimadas).
+    # Os pequenos são descartados, o que na prática os preenche.
+    buracos_preservados = [
+        anel for anel in geometria.interiors
+        if Polygon(anel).area > area_maxima_falha_m2
+    ]
+    return Polygon(geometria.exterior, buracos_preservados)
+
+
 def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
-                                  limiar_dnbr=0.1, limiar_ndvi_vegetacao=0.2):
+                                  limiar_dnbr=0.1, area_minima_m2=500.0,
+                                  area_maxima_falha_m2=500.0):
     b04_antes, b08_antes, b12_antes, mask_antes = dados_antes
     b04_depois, b08_depois, b12_depois, mask_depois = dados_depois
 
@@ -220,11 +397,10 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
     dnbr = nbr_antes - nbr_depois
 
     # Só considera "queimado" um pixel que já era vegetação ANTES do
-    # evento (NDVI pré-fogo acima do limiar). Isso filtra áreas urbanas,
-    # solo exposto e estradas, que têm NDVI baixo mesmo sem incêndio e
-    # podem gerar falso-positivo só pelo dNBR.
+    # evento (NDVI pré-fogo acima do limiar fixo). Filtra áreas urbanas,
+    # solo exposto e estradas, que têm NDVI baixo mesmo sem incêndio.
     ndvi_antes = calcular_ndvi(b08_antes, b04_antes)
-    era_vegetacao = ndvi_antes >= limiar_ndvi_vegetacao
+    era_vegetacao = ndvi_antes >= LIMIAR_NDVI_VEGETACAO_FIXO
 
     valido = (mask_antes > 0) & (mask_depois > 0)
     mascara = ((dnbr >= limiar_dnbr) & valido & era_vegetacao).astype("uint8")
@@ -244,6 +420,31 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
 
     epsg_utm = epsg_sirgas2000_utm(lon, lat)
     gdf_utm = gdf_sirgas.to_crs(epsg=epsg_utm)
+
+    # Separa multipolígonos em partes individuais para poder filtrar por
+    # área mínima peça a peça (evita que um fragmento minúsculo de ruído
+    # "carona" num polígono grande escape do filtro).
+    gdf_utm = gdf_utm.explode(index_parts=False).reset_index(drop=True)
+
+    # Preenche falhas internas pequenas (ruído dentro da mancha queimada),
+    # preservando buracos grandes (áreas realmente não atingidas).
+    if area_maxima_falha_m2 and area_maxima_falha_m2 > 0:
+        gdf_utm["geometry"] = gdf_utm.geometry.apply(
+            lambda g: preencher_falhas_internas(g, area_maxima_falha_m2)
+        )
+
+    if area_minima_m2 and area_minima_m2 > 0:
+        gdf_utm = gdf_utm[gdf_utm.geometry.area >= area_minima_m2].reset_index(drop=True)
+
+    if len(gdf_utm) == 0:
+        raise PipelineError(
+            "Todas as áreas detectadas ficaram abaixo do tamanho mínimo "
+            f"({area_minima_m2:.0f} m² / equivalente ao 'filtro_pixels' "
+            "definido). Tente reduzir 'filtro_pixels' "
+            "ou revisar o limiar de dNBR."
+        )
+
+    gdf_sirgas = gdf_utm.to_crs(epsg=4674)
     area_ha_total = float(gdf_utm.geometry.area.sum() / 10000.0)
 
     return gdf_sirgas, area_ha_total, epsg_utm
@@ -251,40 +452,79 @@ def gerar_poligono_area_queimada(dados_antes, dados_depois, perfil, lon, lat,
 
 def executar_pipeline(data_referencia, latitude, longitude,
                        janela_dias, nuvem_maxima, limiar_dnbr, workdir,
-                       client_id, client_secret,
-                       raio_km=3.0, limiar_ndvi_vegetacao=0.2):
-    """Executa o pipeline completo (via Sentinel Hub) e retorna um dicionário
-    com o resultado. client_id/client_secret são as credenciais informadas
-    pelo usuário no próprio formulário (não ficam armazenadas no servidor)."""
+                       client_id=None, client_secret=None,
+                       raio_km=3.0, filtro_pixels=3, preencher_falhas_pixels=5,
+                       satelite="sentinel2"):
+    """Executa o pipeline completo e retorna um dicionário com o resultado.
+
+    satelite: "sentinel2" (10m, exige client_id/client_secret do Sentinel
+    Hub, informados pelo usuário no formulário - não ficam armazenados no
+    servidor) ou "landsat" (30m, via Earth Search/AWS, API pública, SEM
+    necessidade de credencial).
+
+    NDVI de vegetação é fixo (ver constante no topo do arquivo), não
+    ajustável via parâmetro. filtro_pixels define a área mínima de uma
+    mancha; preencher_falhas_pixels define o tamanho máximo de um buraco
+    interno que será preenchido (buracos maiores são preservados como
+    área não queimada). Ambos em número de pixels — a área por pixel
+    depende do satélite escolhido (10m ou 30m)."""
     os.makedirs(workdir, exist_ok=True)
 
-    token = obter_token(client_id, client_secret)
+    if satelite not in ("sentinel2", "landsat"):
+        raise PipelineError(f"Satélite desconhecido: '{satelite}' (use 'sentinel2' ou 'landsat').")
+
+    resolucao_m = RESOLUCAO_M_SENTINEL2 if satelite == "sentinel2" else RESOLUCAO_M_LANDSAT
+    area_por_pixel = resolucao_m ** 2
+    area_minima_m2 = max(0, filtro_pixels) * area_por_pixel
+    area_maxima_falha_m2 = max(0, preencher_falhas_pixels) * area_por_pixel
+
     bbox_wgs84 = calcular_bbox_wgs84(longitude, latitude, raio_km)
 
-    cena_antes = buscar_cena_sentinel2(bbox_wgs84, data_referencia, "before",
-                                        token, janela_dias, nuvem_maxima)
-    cena_depois = buscar_cena_sentinel2(bbox_wgs84, data_referencia, "after",
-                                         token, janela_dias, nuvem_maxima)
+    if satelite == "sentinel2":
+        token = obter_token(client_id, client_secret)
 
-    if not cena_antes or not cena_depois:
-        raise PipelineError(
-            "Não foi possível encontrar cenas antes/depois dentro da janela "
-            "de dias definida. Aumente 'janela_dias' ou 'nuvem_maxima'."
-        )
+        cena_antes = buscar_cena_sentinel2(bbox_wgs84, data_referencia, "before",
+                                            token, janela_dias, nuvem_maxima)
+        cena_depois = buscar_cena_sentinel2(bbox_wgs84, data_referencia, "after",
+                                             token, janela_dias, nuvem_maxima)
 
-    largura_px, altura_px = _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=10)
+        if not cena_antes or not cena_depois:
+            raise PipelineError(
+                "Não foi possível encontrar cenas Sentinel-2 antes/depois "
+                "dentro da janela de dias definida. Aumente 'janela_dias', "
+                "'nuvem_maxima', ou tente o satélite Landsat."
+            )
 
-    dados_antes_raw, perfil = obter_bandas(
-        bbox_wgs84, cena_antes["data"], token, largura_px, altura_px)
-    dados_depois_raw, _ = obter_bandas(
-        bbox_wgs84, cena_depois["data"], token, largura_px, altura_px)
+        largura_px, altura_px = _resolucao_para_dimensoes(bbox_wgs84, resolucao_m=resolucao_m)
+
+        dados_antes_raw, perfil = obter_bandas(
+            bbox_wgs84, cena_antes["data"], token, largura_px, altura_px)
+        dados_depois_raw, _ = obter_bandas(
+            bbox_wgs84, cena_depois["data"], token, largura_px, altura_px)
+
+    else:  # landsat
+        cena_antes = buscar_cena_landsat(bbox_wgs84, data_referencia, "before",
+                                          janela_dias, nuvem_maxima)
+        cena_depois = buscar_cena_landsat(bbox_wgs84, data_referencia, "after",
+                                           janela_dias, nuvem_maxima)
+
+        if not cena_antes or not cena_depois:
+            raise PipelineError(
+                "Não foi possível encontrar cenas Landsat antes/depois "
+                "dentro da janela de dias definida. Aumente 'janela_dias', "
+                "'nuvem_maxima', ou tente o satélite Sentinel-2."
+            )
+
+        dados_antes_raw, perfil = obter_bandas_landsat(cena_antes["assets"], bbox_wgs84)
+        dados_depois_raw, _ = obter_bandas_landsat(cena_depois["assets"], bbox_wgs84)
 
     dados_antes = tuple(dados_antes_raw)   # (B04, B08, B12, dataMask)
     dados_depois = tuple(dados_depois_raw)
 
     gdf_resultado, area_ha, epsg_utm = gerar_poligono_area_queimada(
         dados_antes, dados_depois, perfil, longitude, latitude,
-        limiar_dnbr=limiar_dnbr, limiar_ndvi_vegetacao=limiar_ndvi_vegetacao,
+        limiar_dnbr=limiar_dnbr, area_minima_m2=area_minima_m2,
+        area_maxima_falha_m2=area_maxima_falha_m2,
     )
 
     caminho_shp = os.path.join(workdir, "area_queimada_sirgas2000.shp")
@@ -293,9 +533,15 @@ def executar_pipeline(data_referencia, latitude, longitude,
     caminho_geojson = os.path.join(workdir, "area_queimada.geojson")
     gdf_resultado.to_file(caminho_geojson, driver="GeoJSON")
 
+    # Remove URLs de asset do dict de retorno da cena (poluem o JSON de resposta)
+    cena_antes_out = {k: v for k, v in cena_antes.items() if k != "assets"}
+    cena_depois_out = {k: v for k, v in cena_depois.items() if k != "assets"}
+
     return {
-        "cena_antes": cena_antes,
-        "cena_depois": cena_depois,
+        "satelite_usado": satelite,
+        "resolucao_m": resolucao_m,
+        "cena_antes": cena_antes_out,
+        "cena_depois": cena_depois_out,
         "area_ha": round(area_ha, 4),
         "epsg_utm_usado": epsg_utm,
         "epsg_saida": 4674,
