@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8" />
+<title>Área Queimada — CBMMG · Sentinel-2</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<style>
+  :root {
+    --bg: #0f1512;
+    --panel: #17201b;
+    --accent: #ff7a3d;
+    --accent-soft: #ffb08a;
+    --text: #eef2ee;
+    --muted: #9aa79c;
+    --ok: #6fbf73;
+    --err: #e56a5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #sidebar {
+    width: 380px;
+    min-width: 380px;
+    background: var(--panel);
+    padding: 24px;
+    overflow-y: auto;
+    border-right: 1px solid #24302a;
+  }
+  #map { flex: 1; }
+  h1 {
+    font-size: 18px;
+    margin: 0 0 4px 0;
+    color: var(--accent-soft);
+  }
+  p.subtitle {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 0 0 20px 0;
+  }
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 14px 0 4px 0;
+  }
+  input {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #2c3a32;
+    background: #0f1512;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; }
+  #cabecalho {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+  #cabecalho img {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+  }
+  #cabecalho-textos h1 { margin: 0; }
+  #autoria {
+    margin-top: 28px;
+    padding-top: 14px;
+    border-top: 1px solid #2c3a32;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  #autoria strong { color: var(--accent-soft); }
+  #credenciais-box {
+    margin: 14px 0 2px 0;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid #3a2a1a;
+    background: #1a140d;
+  }
+  #credenciais-box summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-soft);
+  }
+  #credenciais-box a { color: var(--accent); }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-top: 14px;
+    background: #0f1512;
+    border: 1px solid #2c3a32;
+    border-radius: 6px;
+    padding: 3px;
+  }
+  .tab-btn {
+    flex: 1;
+    padding: 6px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    margin: 0;
+  }
+  .tab-btn.active {
+    background: var(--accent);
+    color: #1a1008;
+    font-weight: 600;
+  }
+  .gms-row {
+    display: flex;
+    gap: 6px;
+    align-items: flex-end;
+  }
+  .gms-row > div { flex: 1; }
+  .gms-row label { margin: 8px 0 4px 0; font-size: 10px; }
+  select.gms-hemis {
+    padding: 8px 4px;
+    border-radius: 6px;
+    border: 1px solid #2c3a32;
+    background: #0f1512;
+    color: var(--text);
+    font-size: 13px;
+  }
+  button {
+    margin-top: 20px;
+    width: 100%;
+    padding: 11px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #1a1008;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status-box {
+    margin-top: 18px;
+    padding: 12px;
+    border-radius: 6px;
+    background: #0f1512;
+    border: 1px solid #2c3a32;
+    font-size: 13px;
+    display: none;
+  }
+  #status-box.show { display: block; }
+  .status-pendente, .status-processando { color: var(--accent-soft); }
+  .status-concluido { color: var(--ok); }
+  .status-erro { color: var(--err); }
+  #resultado { margin-top: 10px; font-size: 13px; line-height: 1.6; }
+  #resultado b { color: var(--accent-soft); }
+  a.download-link {
+    display: inline-block;
+    margin-top: 10px;
+    color: var(--accent);
+    font-size: 13px;
+    text-decoration: none;
+    border: 1px solid var(--accent);
+    padding: 6px 10px;
+    border-radius: 6px;
+  }
+  .hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 20px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="cabecalho">
+    <img src="/img/logo_cbmmg.png" alt="Brasão CBMMG" />
+    <div id="cabecalho-textos">
+      <h1>🔥 Área Queimada — Sentinel-2</h1>
+      <p class="subtitle">dNBR (B08/B12) · Saída em SIRGAS2000 (EPSG:4674)</p>
+    </div>
+  </div>
+
+  <details id="credenciais-box">
+    <summary>🔑 Suas credenciais Sentinel Hub (obrigatório)</summary>
+    <p class="hint" style="margin-top: 8px;">
+      Suas credenciais são enviadas apenas para processar sua consulta e
+      <strong>não ficam salvas no servidor</strong>. Cada pessoa usa a cota
+      da própria conta. Não tem uma? Crie grátis em
+      <a href="https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings" target="_blank" rel="noopener">
+        shapps.dataspace.copernicus.eu
+      </a> → aba "OAuth clients" → "Create new OAuth client".
+    </p>
+    <label>Client ID</label>
+    <input id="sh_client_id" type="text" placeholder="sh-xxxxxxxx-xxxx-..." autocomplete="off" />
+
+    <label>Client Secret</label>
+    <input id="sh_client_secret" type="password" placeholder="••••••••••••••••" autocomplete="off" />
+  </details>
+
+  <div class="tabs">
+    <button type="button" class="tab-btn active" id="tab-decimal" onclick="mudarModoCoord('decimal')">Graus decimais</button>
+    <button type="button" class="tab-btn" id="tab-gms" onclick="mudarModoCoord('gms')">Graus, min, seg</button>
+  </div>
+
+  <div id="modo-decimal">
+    <label>Latitude (clique no mapa para preencher)</label>
+    <input id="lat" type="number" step="any" placeholder="-15.7801" />
+
+    <label>Longitude</label>
+    <input id="lon" type="number" step="any" placeholder="-47.9292" />
+  </div>
+
+  <div id="modo-gms" style="display: none;">
+    <label>Latitude</label>
+    <div class="gms-row">
+      <div><label>Graus</label><input id="lat_g" type="number" min="0" placeholder="15" /></div>
+      <div><label>Min</label><input id="lat_m" type="number" min="0" max="59" placeholder="46" /></div>
+      <div><label>Seg</label><input id="lat_s" type="number" min="0" max="59.999" step="any" placeholder="48.4" /></div>
+      <div>
+        <label>Hemisfério</label>
+        <select id="lat_hemis" class="gms-hemis">
+          <option value="S" selected>S</option>
+          <option value="N">N</option>
+        </select>
+      </div>
+    </div>
+
+    <label>Longitude</label>
+    <div class="gms-row">
+      <div><label>Graus</label><input id="lon_g" type="number" min="0" placeholder="47" /></div>
+      <div><label>Min</label><input id="lon_m" type="number" min="0" max="59" placeholder="55" /></div>
+      <div><label>Seg</label><input id="lon_s" type="number" min="0" max="59.999" step="any" placeholder="45.1" /></div>
+      <div>
+        <label>Hemisfério</label>
+        <select id="lon_hemis" class="gms-hemis">
+          <option value="W" selected>W</option>
+          <option value="E">E</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <label>Data de referência</label>
+  <input id="data_ref" type="date" />
+
+  <div class="row">
+    <div>
+      <label>Janela (dias)</label>
+      <input id="janela" type="number" value="30" />
+    </div>
+    <div>
+      <label>Nuvem máx. (%)</label>
+      <input id="nuvem" type="number" value="30" />
+    </div>
+  </div>
+
+  <label>Limiar dNBR</label>
+  <input id="limiar" type="number" step="0.01" value="0.1" />
+
+  <label>Raio da área (km)</label>
+  <input id="raio_km" type="number" step="0.5" value="3" />
+
+  <button id="btn-processar">Processar</button>
+
+  <div id="status-box">
+    <div id="status-texto"></div>
+    <div id="resultado"></div>
+  </div>
+
+  <p class="hint">
+    Clique em qualquer ponto do mapa para definir latitude/longitude automaticamente.
+    O processamento pode levar alguns minutos (download das cenas Sentinel-2 + cálculo).
+  </p>
+
+  <div id="autoria">
+    <strong>Corpo de Bombeiros Militar de Minas Gerais</strong><br />
+    Autoria: 3º SGT BM Marcos Antonio de Souza Junior — Mat. 148.070-6
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const map = L.map('map').setView([-15.78, -47.93], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+let marker = null;
+let poligonoLayer = null;
+let modoCoord = 'decimal';
+
+function mudarModoCoord(modo) {
+  modoCoord = modo;
+  document.getElementById('modo-decimal').style.display = (modo === 'decimal') ? 'block' : 'none';
+  document.getElementById('modo-gms').style.display = (modo === 'gms') ? 'block' : 'none';
+  document.getElementById('tab-decimal').classList.toggle('active', modo === 'decimal');
+  document.getElementById('tab-gms').classList.toggle('active', modo === 'gms');
+}
+
+function decimalParaGms(valor) {
+  const abs = Math.abs(valor);
+  const graus = Math.floor(abs);
+  const minFloat = (abs - graus) * 60;
+  const minutos = Math.floor(minFloat);
+  const segundos = (minFloat - minutos) * 60;
+  return { graus, minutos, segundos };
+}
+
+function gmsParaDecimal(graus, minutos, segundos, hemisferio) {
+  let valor = graus + (minutos / 60) + (segundos / 3600);
+  if (hemisferio === 'S' || hemisferio === 'W') valor = -valor;
+  return valor;
+}
+
+function preencherCamposDeDecimal(lat, lon) {
+  document.getElementById('lat').value = lat.toFixed(6);
+  document.getElementById('lon').value = lon.toFixed(6);
+
+  const gLat = decimalParaGms(lat);
+  document.getElementById('lat_g').value = gLat.graus;
+  document.getElementById('lat_m').value = gLat.minutos;
+  document.getElementById('lat_s').value = gLat.segundos.toFixed(2);
+  document.getElementById('lat_hemis').value = lat < 0 ? 'S' : 'N';
+
+  const gLon = decimalParaGms(lon);
+  document.getElementById('lon_g').value = gLon.graus;
+  document.getElementById('lon_m').value = gLon.minutos;
+  document.getElementById('lon_s').value = gLon.segundos.toFixed(2);
+  document.getElementById('lon_hemis').value = lon < 0 ? 'W' : 'E';
+}
+
+function obterLatLonAtual() {
+  if (modoCoord === 'decimal') {
+    return {
+      lat: parseFloat(document.getElementById('lat').value),
+      lon: parseFloat(document.getElementById('lon').value),
+    };
+  }
+  const latG = parseFloat(document.getElementById('lat_g').value || 0);
+  const latM = parseFloat(document.getElementById('lat_m').value || 0);
+  const latS = parseFloat(document.getElementById('lat_s').value || 0);
+  const latH = document.getElementById('lat_hemis').value;
+
+  const lonG = parseFloat(document.getElementById('lon_g').value || 0);
+  const lonM = parseFloat(document.getElementById('lon_m').value || 0);
+  const lonS = parseFloat(document.getElementById('lon_s').value || 0);
+  const lonH = document.getElementById('lon_hemis').value;
+
+  return {
+    lat: gmsParaDecimal(latG, latM, latS, latH),
+    lon: gmsParaDecimal(lonG, lonM, lonS, lonH),
+  };
+}
+
+map.on('click', (e) => {
+  preencherCamposDeDecimal(e.latlng.lat, e.latlng.lng);
+  if (marker) map.removeLayer(marker);
+  marker = L.marker(e.latlng).addTo(map);
+});
+
+const btn = document.getElementById('btn-processar');
+const statusBox = document.getElementById('status-box');
+const statusTexto = document.getElementById('status-texto');
+const resultadoDiv = document.getElementById('resultado');
+
+btn.addEventListener('click', async () => {
+  const { lat, lon } = obterLatLonAtual();
+  const dataRef = document.getElementById('data_ref').value;
+  const janela = parseInt(document.getElementById('janela').value || "30");
+  const nuvem = parseInt(document.getElementById('nuvem').value || "30");
+  const limiar = parseFloat(document.getElementById('limiar').value || "0.1");
+  const raioKm = parseFloat(document.getElementById('raio_km').value || "3");
+  const shClientId = document.getElementById('sh_client_id').value.trim();
+  const shClientSecret = document.getElementById('sh_client_secret').value.trim();
+
+  if (isNaN(lat) || isNaN(lon) || !dataRef) {
+    alert("Preencha latitude, longitude e data de referência.");
+    return;
+  }
+  if (!shClientId || !shClientSecret) {
+    alert("Preencha suas credenciais Sentinel Hub (Client ID e Client Secret) na seção acima.");
+    document.getElementById('credenciais-box').open = true;
+    return;
+  }
+
+  btn.disabled = true;
+  statusBox.classList.add('show');
+  resultadoDiv.innerHTML = "";
+  statusTexto.className = "status-pendente";
+  statusTexto.textContent = "Enviando solicitação...";
+
+  try {
+    const resp = await fetch('/processar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        data_referencia: dataRef,
+        latitude: lat,
+        longitude: lon,
+        janela_dias: janela,
+        nuvem_maxima: nuvem,
+        limiar_dnbr: limiar,
+        raio_km: raioKm,
+        sentinel_hub_client_id: shClientId,
+        sentinel_hub_client_secret: shClientSecret
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "Erro ao iniciar processamento");
+
+    pollStatus(data.job_id);
+  } catch (err) {
+    statusTexto.className = "status-erro";
+    statusTexto.textContent = "Erro: " + err.message;
+    btn.disabled = false;
+  }
+});
+
+async function pollStatus(jobId) {
+  statusTexto.className = "status-processando";
+  statusTexto.textContent = "Processando (busca de cenas, download, cálculo dNBR)...";
+
+  const interval = setInterval(async () => {
+    const resp = await fetch('/status/' + jobId);
+    const data = await resp.json();
+
+    if (data.status === 'concluido') {
+      clearInterval(interval);
+      statusTexto.className = "status-concluido";
+      statusTexto.textContent = "Concluído!";
+      mostrarResultado(jobId, data.resultado);
+      btn.disabled = false;
+    } else if (data.status === 'erro') {
+      clearInterval(interval);
+      statusTexto.className = "status-erro";
+      statusTexto.textContent = "Erro: " + data.erro;
+      btn.disabled = false;
+    }
+  }, 4000);
+}
+
+function mostrarResultado(jobId, resultado) {
+  resultadoDiv.innerHTML = `
+    <div><b>Área queimada:</b> ${resultado.area_ha.toLocaleString('pt-BR')} ha</div>
+    <div><b>CRS saída (polígono):</b> EPSG:${resultado.epsg_saida} (SIRGAS2000)</div>
+    <div><b>CRS usado no cálculo:</b> EPSG:${resultado.epsg_utm_usado} (SIRGAS2000/UTM)</div>
+    <div><b>Cena antes:</b> ${resultado.cena_antes.data.substring(0,10)}</div>
+    <div><b>Cena depois:</b> ${resultado.cena_depois.data.substring(0,10)}</div>
+    <a class="download-link" href="/download/${jobId}" download>⬇ Baixar Shapefile (.zip)</a>
+  `;
+
+  fetch('/geojson/' + jobId)
+    .then(r => r.json())
+    .then(geojson => {
+      if (poligonoLayer) map.removeLayer(poligonoLayer);
+      poligonoLayer = L.geoJSON(geojson, {
+        style: { color: '#ff7a3d', weight: 2, fillOpacity: 0.35 }
+      }).addTo(map);
+      map.fitBounds(poligonoLayer.getBounds());
+    });
+}
+</script>
+</body>
+</html>
