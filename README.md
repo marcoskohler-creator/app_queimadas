@@ -1,4 +1,4 @@
-# Área Queimada — Sentinel-2 (dNBR) — App Web
+# Mapeamento de Cicatriz de Incêndio (dNBR) — App Web
 
 Aplicação web (FastAPI + frontend com mapa Leaflet) que detecta área queimada
 usando as bandas B08/B12 do Sentinel-2 (via Sentinel Hub / Copernicus Data
