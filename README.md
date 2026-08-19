@@ -12,7 +12,7 @@ e retorna:
 
 - **Sentinel-2** (10m/pixel, padrão): via Sentinel Hub, exige credencial
   própria do usuário (ver seção abaixo).
-- **Landsat 8/9** (30m/pixel): via Earth Search (Element84/AWS), API
+- **Landsat 8/9** (30m/pixel): via Microsoft Planetary Computer, API
   pública, **sem necessidade de credencial nenhuma**. Boa alternativa
   quando não há cena Sentinel-2 disponível na janela de datas, ou para
   quem não quer criar conta no Copernicus. Contorno menos detalhado por

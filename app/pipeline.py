@@ -5,8 +5,8 @@ Suporta dois satélites, com o mesmo cálculo de dNBR/NDVI ao final:
 
 - Sentinel-2 (10m/pixel): via Sentinel Hub (Catalog API + Process API),
   exige credenciais do usuário (Client ID/Secret do Sentinel Hub).
-- Landsat 8/9 (30m/pixel): via Earth Search (Element84/AWS), API STAC
-  pública, SEM necessidade de credencial nenhuma.
+- Landsat 8/9 (30m/pixel): via Microsoft Planetary Computer (Catalog
+  STAC + assinatura de URL), API pública, SEM necessidade de credencial.
 """
 import os
 import math
@@ -26,7 +26,9 @@ TOKEN_URL = ("https://identity.dataspace.copernicus.eu/auth/realms/CDSE/"
              "protocol/openid-connect/token")
 SH_CATALOG_URL = "https://sh.dataspace.copernicus.eu/catalog/v1/search"
 SH_PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
-EARTH_SEARCH_URL = "https://earth-search.aws.element84.com/v1/search"
+EARTH_SEARCH_URL = "https://earth-search.aws.element84.com/v1/search"  # não usado (bucket requester-pays)
+PC_STAC_SEARCH_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+PC_SIGN_URL = "https://planetarycomputer.microsoft.com/api/sas/v1/sign"
 
 class PipelineError(Exception):
     pass
@@ -222,10 +224,34 @@ def obter_bandas(bbox_wgs84, data_iso, token, largura_px, altura_px):
 # (GDAL faz leitura parcial/"windowed" sem baixar o arquivo inteiro).
 # =============================================================================
 
+# =============================================================================
+# LANDSAT 8/9 — via Microsoft Planetary Computer, API STAC pública, sem
+# necessidade de conta/credencial. Cenas Collection 2 Level-2 (reflectância
+# de superfície já corrigida). Os arquivos ficam em Azure Blob Storage e
+# exigem uma URL "assinada" (token temporário obtido num endpoint público,
+# sem autenticação) antes de serem lidos — diferente do AWS Earth Search,
+# cujo bucket Landsat é "requester pays" (exigiria credencial AWS própria,
+# por isso não é usado aqui).
+# =============================================================================
+
+def _assinar_url_planetary_computer(href):
+    """Troca uma URL de asset por uma URL assinada (com token temporário),
+    exigido pelo Planetary Computer para ler arquivos no Azure Blob
+    Storage. O endpoint de assinatura em si é público, sem necessidade de
+    conta ou API key."""
+    r = requests.get(PC_SIGN_URL, params={"href": href})
+    if r.status_code != 200:
+        raise PipelineError(
+            f"Erro ao assinar URL no Planetary Computer ({r.status_code}): "
+            f"{r.text[:300]}"
+        )
+    return r.json()["href"]
+
+
 def buscar_cena_landsat(bbox_wgs84, data_ref, direcao, janela_dias=30, nuvem_max=30):
     """
-    Busca no Earth Search (STAC) a cena Landsat Collection 2 Level-2 mais
-    próxima da data_ref, ANTES ou DEPOIS, cobrindo o bbox informado.
+    Busca no Planetary Computer (STAC) a cena Landsat Collection 2 Level-2
+    mais próxima da data_ref, ANTES ou DEPOIS, cobrindo o bbox informado.
     Não exige autenticação (API pública).
     """
     data_ref_dt = dt.datetime.strptime(data_ref, "%Y-%m-%d")
@@ -244,10 +270,10 @@ def buscar_cena_landsat(bbox_wgs84, data_ref, direcao, janela_dias=30, nuvem_max
         "limit": 30,
         "query": {"eo:cloud_cover": {"lt": nuvem_max}},
     }
-    r = requests.post(EARTH_SEARCH_URL, json=corpo)
+    r = requests.post(PC_STAC_SEARCH_URL, json=corpo)
     if r.status_code != 200:
         raise PipelineError(
-            f"Erro no Earth Search ({r.status_code}) ao buscar cena "
+            f"Erro no Planetary Computer ({r.status_code}) ao buscar cena "
             f"Landsat '{direcao}': {r.text[:500]}"
         )
     features = r.json().get("features", [])
@@ -261,7 +287,7 @@ def buscar_cena_landsat(bbox_wgs84, data_ref, direcao, janela_dias=30, nuvem_max
         "id": feat["id"],
         "data": feat["properties"]["datetime"],
         "nuvem": feat["properties"].get("eo:cloud_cover"),
-        "assets": feat["assets"],  # dict com URLs das bandas (COG na AWS)
+        "assets": feat["assets"],  # dict com URLs das bandas (Azure Blob Storage)
     }
 
 
@@ -292,10 +318,10 @@ def _ler_janela_remota(url, bbox_wgs84):
 def obter_bandas_landsat(assets, bbox_wgs84):
     """
     Lê as bandas equivalentes (vermelho, NIR, SWIR2) + QA_PIXEL de uma
-    cena Landsat, recortadas na área de interesse, e devolve no MESMO
-    formato usado pelo Sentinel-2: array (4, H, W) = [B04, B08, B12,
-    dataMask] + perfil. Isso permite reaproveitar sem alteração o resto
-    do pipeline (cálculo de NBR/NDVI e vetorização).
+    cena Landsat (Planetary Computer), recortadas na área de interesse, e
+    devolve no MESMO formato usado pelo Sentinel-2: array (4, H, W) =
+    [B04, B08, B12, dataMask] + perfil. Isso permite reaproveitar sem
+    alteração o resto do pipeline (cálculo de NBR/NDVI e vetorização).
 
     Conversão DN -> refletância de superfície usa a escala/offset oficial
     USGS para produtos Collection 2 Level-2 (necessário para o cálculo de
@@ -310,19 +336,12 @@ def obter_bandas_landsat(assets, bbox_wgs84):
     except KeyError as e:
         raise PipelineError(f"Asset de banda Landsat não encontrado: {e}")
 
-    # Se o asset vier como s3:// (em vez de https://), o bucket é
-    # "requester pays" e exigiria credenciais AWS próprias - que este
-    # pipeline não usa por design (Landsat deveria ser "sem credencial").
-    # Falha aqui com mensagem clara em vez de um erro de rede confuso.
-    for nome_banda, url in [("red", url_vermelho), ("nir08", url_nir),
-                             ("swir22", url_swir2), ("qa_pixel", url_qa)]:
-        if url.startswith("s3://"):
-            raise PipelineError(
-                f"O asset '{nome_banda}' desta cena Landsat está em bucket "
-                "AWS 'requester pays' (URL s3://), que exige credenciais "
-                "AWS próprias - não suportado nesta versão. Tente novamente "
-                "mais tarde ou use o satélite Sentinel-2."
-            )
+    # Assina cada URL (token temporário, endpoint público) antes de ler -
+    # exigido pelo Planetary Computer para acessar o Azure Blob Storage.
+    url_vermelho = _assinar_url_planetary_computer(url_vermelho)
+    url_nir = _assinar_url_planetary_computer(url_nir)
+    url_swir2 = _assinar_url_planetary_computer(url_swir2)
+    url_qa = _assinar_url_planetary_computer(url_qa)
 
     dn_vermelho, perfil = _ler_janela_remota(url_vermelho, bbox_wgs84)
     dn_nir, _ = _ler_janela_remota(url_nir, bbox_wgs84)

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from . import pipeline
 
-app = FastAPI(title="Detecção de Área Queimada - Sentinel-2 (SIRGAS2000)")
+app = FastAPI(title="Mapeamento de Cicatriz de Incêndio - CBMMG (SIRGAS2000)")
 
 # --- Proteção por senha (HTTP Basic Auth) ---
 # Se APP_USERNAME/APP_PASSWORD não estiverem definidos, o app fica
